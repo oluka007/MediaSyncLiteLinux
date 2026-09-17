@@ -34,6 +34,8 @@
 #include <gtk/gtk.h>
 
 #include "ibmsl.h"
+#include "hashset.h"
+#include "tags.h"
 
 #pragma GCC diagnostic ignored "-Wunused-parameter"
 
@@ -70,6 +72,8 @@ profile_data_t profile = {
     .scan_dir = NULL,
     .supported_exts = NULL,
     .md5s = NULL,
+    .md5_set = NULL,
+    .tag_set = NULL,
     .running_threads = 0
 };
 
@@ -79,6 +83,7 @@ f_list_t files = {
     .skipped = 0,
     .uploaded = 0,
     .errored = 0,
+    .tag_dupes = 0,
     .list = NULL
 };
 
@@ -372,6 +377,23 @@ void *login_to_service(void *arg) {
     __MALLOC(profile.md5s, char**, sizeof(char*) * (json_array_size(json_object_get(root, "md5")) + 1));
     j = 0;
 
+    /* Hash set mirroring md5s[], used for O(1) duplicate lookups while
+     * scanning instead of the O(n) linear scan the old code performed
+     * for every single file on disk. Also used, and kept up to date, as
+     * files are successfully uploaded in this session - see
+     * upload_to_ibroadcast() - so re-scanning without restarting the
+     * app (previously a known issue) no longer re-queues files already
+     * uploaded during the current run. */
+    if((profile.md5_set = hash_set_new(json_array_size(json_object_get(root, "md5")) * 2 + 16)) == NULL) {
+        g_critical("Memory allocation error when creating md5 hash set!");
+        exit(EXIT_FAILURE);
+    }
+
+    if((profile.tag_set = hash_set_new(256)) == NULL) {
+        g_critical("Memory allocation error when creating tag hash set!");
+        exit(EXIT_FAILURE);
+    }
+
     for(i = 0; i < json_array_size(json_object_get(root, "md5")); i++) {
         /* In some cases server return JSON object with null values. Maybe it's error or server not yet
          * calculate MD5? */
@@ -384,6 +406,7 @@ void *login_to_service(void *arg) {
         }
         __MALLOC(profile.md5s[j], char*, sizeof(char) * (strlen(ent_value) + 1));
         strcpy(profile.md5s[j], ent_value);
+        hash_set_add(profile.md5_set, ent_value);
         j++;
     }
     profile.md5s[j] = NULL;
@@ -416,6 +439,16 @@ char *get_start_dir(void) {
     return homedir;
 }
 
+/* Duplicate-detection sets scoped to a single directory scan (catches
+ * the same file/track being reachable more than once in this scan,
+ * e.g. via symlinks or being listed under two different paths).
+ * Separate from profile.md5_set/profile.tag_set (which track what the
+ * server already has, plus anything uploaded so far this session) so
+ * that a fresh scan doesn't accumulate stale "seen in this batch"
+ * entries from a previous scan. */
+static hash_set_t *scan_seen_md5 = NULL;
+static hash_set_t *scan_seen_tags = NULL;
+
 void *scan_dirs(void *arg) {
 
     g_message("Scanning directory: %s", profile.scan_dir);
@@ -434,6 +467,12 @@ void *scan_dirs(void *arg) {
     files.remaining = 0;
     files.idx = 0;
     files.errored = 0;
+    files.tag_dupes = 0;
+
+    hash_set_free(scan_seen_md5);
+    hash_set_free(scan_seen_tags);
+    scan_seen_md5 = hash_set_new(1024);
+    scan_seen_tags = hash_set_new(256);
 
     if(nftw(profile.scan_dir, nftw_cb, 20, 0) == -1) {
         __STRNCPY(ptr->sbar->text, "Error when directory traversal!", __MAX_SBAR_TEXT_LEN_);
@@ -465,11 +504,12 @@ void *scan_dirs(void *arg) {
 static int nftw_cb(const char *fpath, const struct stat *sb,
                    int tflag, struct FTW *ftwbuf) {
 
-    char *ext = NULL, *md5 = NULL;
+    char *ext = NULL, *md5 = NULL, *tag_sig = NULL, *display_name = NULL;
     gchar *filename;
     gsize writen;
-    size_t i = 0, j = 0, k = 0;
+    size_t i = 0;
     GError *error = NULL;
+    audio_tags_t *tags = NULL;
 
     filename = g_filename_to_utf8(fpath, -1, NULL, &writen, &error);
 
@@ -491,20 +531,57 @@ static int nftw_cb(const char *fpath, const struct stat *sb,
                 continue;
             if((md5 = get_file_md5_hash(fpath)) == NULL)
                 return 0;
-            /* Skip file if it exists on server */
-            for(k = 0; profile.md5s[k] != NULL; k++) {
-                if(strcasecmp(md5, profile.md5s[k]) == 0) {
+
+            /* Skip file if it exists on server, or if it was already
+             * uploaded earlier in this app run. Previously this was a
+             * linear scan over profile.md5s for every single file
+             * (O(n) per file, O(n*m) overall for a library of n files
+             * that has m tracks server-side); a hash set makes each
+             * lookup O(1). Checking profile.md5_set (which is kept in
+             * sync as uploads succeed - see upload_to_ibroadcast())
+             * also fixes the previously documented issue where the app
+             * had to be restarted to avoid re-uploading files that were
+             * just uploaded. */
+            if(hash_set_contains(profile.md5_set, md5)) {
+                files.skipped++;
+                free(md5);
+                return 0;
+            }
+
+            /* Skip, if the exact same file was already queued earlier
+             * in this scan (e.g. reachable via two different paths). */
+            if(!hash_set_add(scan_seen_md5, md5)) {
+                free(md5);
+                return 0;
+            }
+
+            /* Secondary duplicate check: compare a normalized
+             * title/artist/album/track "signature" built from the
+             * file's tags against tracks the server already has and
+             * anything queued so far. This catches duplicates that MD5
+             * alone would miss, such as the same song re-encoded to a
+             * different format/bitrate, or re-tagged copies of a file
+             * that was already uploaded. Files without usable tags
+             * simply fall back to MD5-only detection. */
+            tags = read_audio_tags(fpath);
+            tag_sig = build_tag_signature(tags);
+            display_name = build_display_name(tags, fpath);
+
+            if(tag_sig != NULL) {
+                if(hash_set_contains(profile.tag_set, tag_sig) ||
+                   !hash_set_add(scan_seen_tags, tag_sig)) {
                     files.skipped++;
+                    files.tag_dupes++;
                     free(md5);
+                    free(tag_sig);
+                    free(display_name);
+                    free_audio_tags(tags);
+                    free(filename);
                     return 0;
                 }
             }
-            /* Skip, if file already exists in file list */
-            for(j = 0; j < files.count; j++)
-                if(strcasecmp(files.list[j]->md5, md5) == 0) {
-                    free(md5);
-                    return 0;
-                }
+
+            free_audio_tags(tags);
 
             if((files.list = (f_info_t **)realloc(files.list, (files.count + 1) * sizeof(f_info_t *))) == NULL) {
                 g_critical("Memory allocation error when extend filelist memory!");
@@ -514,7 +591,9 @@ static int nftw_cb(const char *fpath, const struct stat *sb,
             __MALLOC(files.list[files.count]->name, char*, sizeof(char) * (strlen(fpath) + 1));
 
             strcpy(files.list[files.count]->name, fpath);
-            files.list[files.count]->md5 =  md5;
+            files.list[files.count]->md5 = md5;
+            files.list[files.count]->tag_sig = tag_sig;
+            files.list[files.count]->display_name = display_name;
 
             files.count++;
             free(filename);
@@ -574,6 +653,7 @@ void *upload_to_ibroadcast(void *arg) {
     GError *error = NULL;
     gsize writen;
     gchar *message;
+    char *cur_md5 = NULL, *cur_tag_sig = NULL;
 
     struct curl_httppost* post = NULL;
     struct curl_httppost* last = NULL;
@@ -629,6 +709,7 @@ void *upload_to_ibroadcast(void *arg) {
 
         if(files.list[i] == NULL) {
             g_message(" - file is null, skipping");
+            pthread_mutex_unlock(&files_mtx);
             continue;
         }
         
@@ -636,7 +717,16 @@ void *upload_to_ibroadcast(void *arg) {
         __MALLOC(tc->name_label->text, char*, sizeof(char) *(strlen(files.list[i]->name) + 1));
         strcpy(tc->name_label->text, files.list[i]->name);
         free(files.list[i]->name);
-        free(files.list[i]->md5);
+
+        /* Hand off ownership of md5/tag_sig instead of freeing them here:
+         * on a successful upload below they are registered into
+         * profile.md5_set/profile.tag_set so later files in this same
+         * session (including ones already queued, or found in a later
+         * re-scan without restarting the app) are recognised as
+         * duplicates. On failure/skip they are simply freed. */
+        cur_md5 = files.list[i]->md5;
+        cur_tag_sig = files.list[i]->tag_sig;
+        free(files.list[i]->display_name);
         free(files.list[i]);
         files.list[i] = NULL;
 
@@ -688,13 +778,21 @@ void *upload_to_ibroadcast(void *arg) {
                 __STRNCPY(tc->sbar->text, "Error in service reply!", __MAX_SBAR_TEXT_LEN_);
                 gdk_threads_add_idle(set_label_text, tc->sbar);
 
-                pthread_mutex_lock(&rt_mtx);
-                profile.running_threads--;
-                if(profile.running_threads == 0)
-                    gdk_threads_add_idle(finished_screen_show, NULL);
-                pthread_mutex_unlock(&rt_mtx);
+                pthread_mutex_lock(&uploaded_mtx);
+                ++files.errored;
+                pthread_mutex_unlock(&uploaded_mtx);
 
-                return NULL;
+                free(cur_md5);
+                free(cur_tag_sig);
+                cur_md5 = cur_tag_sig = NULL;
+
+                curl_formfree(post);
+                post = NULL;
+                last = NULL;
+                free(chunk->memory);
+                free(tc->name_label->text);
+                tc->name_label->text = NULL;
+                continue;
             }
 
             if(!json_is_object(root)) {
@@ -702,13 +800,56 @@ void *upload_to_ibroadcast(void *arg) {
                 __STRNCPY(tc->sbar->text, "Malformed JSON object!", __MAX_SBAR_TEXT_LEN_);
                 gdk_threads_add_idle(set_label_text, tc->sbar);
 
-                pthread_mutex_lock(&rt_mtx);
-                profile.running_threads--;
-                if(profile.running_threads == 0)
-                    gdk_threads_add_idle(finished_screen_show, NULL);
-                pthread_mutex_unlock(&rt_mtx);
+                pthread_mutex_lock(&uploaded_mtx);
+                ++files.errored;
+                pthread_mutex_unlock(&uploaded_mtx);
 
-                return NULL;
+                free(cur_md5);
+                free(cur_tag_sig);
+                cur_md5 = cur_tag_sig = NULL;
+
+                json_decref(root);
+                curl_formfree(post);
+                post = NULL;
+                last = NULL;
+                free(chunk->memory);
+                free(tc->name_label->text);
+                tc->name_label->text = NULL;
+                continue;
+            }
+
+            /* The "result" field indicates whether the service actually
+             * accepted the upload. Previously this wasn't checked at
+             * all, so a rejected upload (bad auth, quota, corrupt file,
+             * etc.) was silently counted as a success. */
+            if(json_object_get(root, "result") != NULL &&
+               json_boolean_value(json_object_get(root, "result")) == 0) {
+
+                const char *err_msg = json_string_value(json_object_get(root, "message"));
+
+                g_warning("Upload rejected by server: %s", err_msg ? err_msg : "(no message)");
+
+                pthread_mutex_lock(&up_sbar_mtx);
+                __STRNCPY(tc->sbar->text, err_msg ? err_msg : "Upload rejected by server!", __MAX_SBAR_TEXT_LEN_);
+                gdk_threads_add_idle(set_label_text, tc->sbar);
+                pthread_mutex_unlock(&up_sbar_mtx);
+
+                pthread_mutex_lock(&uploaded_mtx);
+                ++files.errored;
+                pthread_mutex_unlock(&uploaded_mtx);
+
+                free(cur_md5);
+                free(cur_tag_sig);
+                cur_md5 = cur_tag_sig = NULL;
+
+                json_decref(root);
+                curl_formfree(post);
+                post = NULL;
+                last = NULL;
+                free(chunk->memory);
+                free(tc->name_label->text);
+                tc->name_label->text = NULL;
+                continue;
             }
 
             message = g_filename_to_utf8(json_string_value(json_object_get(root, "message")), -1, NULL, &writen, &error);
@@ -727,6 +868,24 @@ void *upload_to_ibroadcast(void *arg) {
                 free(message);
             }
 
+            /* Upload confirmed successful: register the file's MD5 (and
+             * tag signature, if any) into the persistent, session-wide
+             * sets so any later file - whether already queued, or found
+             * by a subsequent re-scan without restarting the app - is
+             * recognised as a duplicate. This directly addresses the
+             * previously documented "must restart the app to avoid
+             * re-uploading files as duplicates" issue. */
+            pthread_mutex_lock(&files_mtx);
+            if(cur_md5 != NULL)
+                hash_set_add(profile.md5_set, cur_md5);
+            if(cur_tag_sig != NULL)
+                hash_set_add(profile.tag_set, cur_tag_sig);
+            pthread_mutex_unlock(&files_mtx);
+
+            free(cur_md5);
+            free(cur_tag_sig);
+            cur_md5 = cur_tag_sig = NULL;
+
             pthread_mutex_lock(&uploaded_mtx);
             sprintf(tc->count_l->text, __COUNT_LABEL_TEMPLATE_, ++files.uploaded, --files.remaining, files.skipped, files.errored);
             gdk_threads_add_idle(set_label_text, tc->count_l);
@@ -743,6 +902,10 @@ void *upload_to_ibroadcast(void *arg) {
             pthread_mutex_lock(&uploaded_mtx);
             ++files.errored;
             pthread_mutex_unlock(&uploaded_mtx);
+
+            free(cur_md5);
+            free(cur_tag_sig);
+            cur_md5 = cur_tag_sig = NULL;
         }
 
         curl_formfree(post);

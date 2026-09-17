@@ -1,34 +1,25 @@
 .\"                                      Hey, EMACS: -*- nroff -*-
 .\" (C) Copyright 2021 iBroadcast Media, LLC <ryan@ibroadcast.com>,
 .\"
-.\" First parameter, NAME, should be all caps
-.\" Second parameter, SECTION, should be 1-8, maybe w/ subsection
-.\" other parameters are allowed: see man(7), man(1)
-.TH Mediasynclite SECTION "March 19 2021"
-.\" Please adjust this date whenever revising the manpage.
-.\"
-.\" Some roff macros, for reference:
-.\" .nh        disable hyphenation
-.\" .hy        enable hyphenation
-.\" .ad l      left justify
-.\" .ad b      justify to both left and right margins
-.\" .nf        disable filling
-.\" .fi        enable filling
-.\" .br        insert line break
-.\" .sp <n>    insert n+1 empty lines
-.\" for manpage-specific macros, see man(7)
+.TH MEDIASYNCLITE 1 "August 2026" "mediasynclite" "User Commands"
 .SH NAME
 mediasynclite \- Upload your music library to your iBroadcast account
 .SH SYNOPSIS
 .B mediasynclite
-
 .SH DESCRIPTION
-This manual page documents briefly the
 .B mediasynclite
+is a native GTK application that scans a local music library,
+reads ID3v2/ID3v1 and Vorbis-comment tags where available, and uploads new
+tracks to your iBroadcast cloud account. It performs MD5- and tag-based
+duplicate detection so previously uploaded tracks are not sent again.
 .PP
-.\" TeX users may be more comfortable with the \fB<whatever>\fP and
-.\" \fI<whatever>\fP escape sequences to invode bold face and italics,
-.\" respectively.
-\fBmediasynclite\fP is a program that allows you to upload your music library to your iBroadcast account.
+A desktop entry and application icon are installed alongside the binary,
+so
+.B mediasynclite
+can also be launched from your desktop environment's application menu.
 .SH OPTIONS
-This is a GUI program and there are no options.
+This is a GUI program and there are no command-line options.
+.SH SEE ALSO
+Homepage: https://github.com/iBroadcastMediaServices/MediaSyncLiteLinux
+.SH AUTHOR
+iBroadcast Media, LLC <ryan@ibroadcast.com>

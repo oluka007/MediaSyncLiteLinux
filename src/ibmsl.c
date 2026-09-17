@@ -449,6 +449,17 @@ gboolean on_filelist_win_show(GtkWidget *widget, gpointer arg) {
 
     for(i = 0; i < files.count; i++) {
         gtk_text_buffer_insert_at_cursor(buffer,files.list[i]->name,-1);
+
+        /* When tag data was available and produced a nicer label than
+         * the bare filename, show it alongside the path so the user can
+         * confirm what's actually about to be uploaded. */
+        if(files.list[i]->display_name != NULL &&
+           strcmp(files.list[i]->display_name, files.list[i]->name) != 0) {
+            gtk_text_buffer_insert_at_cursor(buffer, "  (", -1);
+            gtk_text_buffer_insert_at_cursor(buffer, files.list[i]->display_name, -1);
+            gtk_text_buffer_insert_at_cursor(buffer, ")", -1);
+        }
+
         gtk_text_buffer_insert_at_cursor(buffer,"\n",-1);
     }
 
@@ -642,6 +653,7 @@ gboolean on_hide_result_win(GtkWidget *widget, gpointer ptr) {
     files.uploaded = 0;
     files.remaining = 0;
     files.errored = 0;
+    files.tag_dupes = 0;
 
     return FALSE;
 }

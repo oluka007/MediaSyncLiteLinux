@@ -1,0 +1,109 @@
+name: Build & Validate Package
+
+# Runs on every push (any branch) and on pull requests targeting master,
+# so the app and the .deb package are built and validated on every commit.
+on:
+  push:
+    branches: ['**']
+  pull_request:
+    branches: [master]
+  workflow_dispatch: {}
+
+jobs:
+  build-and-validate:
+    name: Build app, build .deb, validate desktop/icon integration
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential debhelper devscripts \
+            libcurl4-openssl-dev libgtk-3-dev libjansson-dev libssl-dev openssl \
+            desktop-file-utils lintian
+
+      - name: Compile the application (make)
+        run: |
+          make clean
+          make
+
+      - name: Verify the binary was produced
+        run: |
+          test -x ./mediasynclite
+          file ./mediasynclite
+
+      - name: Validate the .desktop file
+        run: |
+          desktop-file-validate share/applications/mediasynclite.desktop
+
+      - name: Verify app icon set is present
+        run: |
+          test -f share/ui/icon.png
+          for size in 16x16 22x22 24x24 32x32 48x48 64x64 128x128 256x256; do
+            test -f "share/icons/hicolor/${size}/apps/mediasynclite.png" \
+              || { echo "::error::Missing icon for size ${size}"; exit 1; }
+          done
+
+      - name: Test `make install` (desktop entry + icons land in the right paths)
+        run: |
+          make install DESTDIR="${PWD}/.stage" PREFIX=/usr
+          test -f ".stage/usr/bin/mediasynclite"
+          test -f ".stage/usr/share/applications/mediasynclite.desktop"
+          test -f ".stage/usr/share/icons/hicolor/256x256/apps/mediasynclite.png"
+          desktop-file-validate ".stage/usr/share/applications/mediasynclite.desktop"
+          rm -rf .stage
+
+      - name: Reset build tree before packaging
+        run: make clean
+
+      - name: Build the Debian package
+        run: |
+          dpkg-buildpackage -us -uc -b
+
+      - name: Locate built .deb and copy into workspace
+        id: deb
+        run: |
+          SRC_DEB=$(ls ../mediasynclite_*_*.deb | head -n1)
+          mkdir -p dist
+          cp "${SRC_DEB}" dist/
+          DEB_PATH="dist/$(basename "${SRC_DEB}")"
+          echo "path=${DEB_PATH}" >> "$GITHUB_OUTPUT"
+          echo "Built package: ${DEB_PATH}"
+
+      - name: Inspect package contents
+        run: |
+          dpkg-deb -I "${{ steps.deb.outputs.path }}"
+          dpkg-deb -c "${{ steps.deb.outputs.path }}"
+
+      - name: Verify desktop entry & icons are inside the .deb
+        run: |
+          CONTENTS=$(dpkg-deb -c "${{ steps.deb.outputs.path }}")
+          echo "$CONTENTS" | grep -q './usr/share/applications/mediasynclite.desktop' \
+            || { echo "::error::Desktop entry missing from package"; exit 1; }
+          echo "$CONTENTS" | grep -q './usr/share/icons/hicolor/.*/apps/mediasynclite.png' \
+            || { echo "::error::Icon set missing from package"; exit 1; }
+          echo "$CONTENTS" | grep -q './usr/bin/mediasynclite' \
+            || { echo "::error::Binary missing from package"; exit 1; }
+
+      - name: Validate package with lintian
+        run: |
+          lintian --fail-on error,warning "${{ steps.deb.outputs.path }}"
+
+      - name: Test package installation
+        run: |
+          sudo apt-get install -y "./${{ steps.deb.outputs.path }}"
+          dpkg -s mediasynclite
+          test -x /usr/bin/mediasynclite
+          desktop-file-validate /usr/share/applications/mediasynclite.desktop
+
+      - name: Upload built .deb as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: mediasynclite-deb
+          path: ${{ steps.deb.outputs.path }}
+          if-no-files-found: error
+          retention-days: 14

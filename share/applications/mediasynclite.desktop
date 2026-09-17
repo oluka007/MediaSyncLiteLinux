@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=MediaSync Lite
+GenericName=Music Uploader
+Comment=Upload music from your local machine to your iBroadcast cloud library
+Exec=mediasynclite
+Icon=mediasynclite
+Terminal=false
+Categories=AudioVideo;
+Keywords=music;audio;upload;sync;ibroadcast;
+StartupNotify=true

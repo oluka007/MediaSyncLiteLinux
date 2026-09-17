@@ -18,6 +18,8 @@
 #ifndef __IBMSL_H_
 #define __IBMSL_H_
 
+#include "hashset.h"
+
 #define __APP_UI_            "ui.glade"
 
 #define __JSON_API_URL_      "https://api.ibroadcast.com/s/JSON/"
@@ -53,6 +55,26 @@ typedef struct __user_profile_data_ {
     char *scan_dir;
     char **supported_exts;
     char **md5s;
+    /* Fast, case-insensitive O(1) membership lookup mirroring md5s[].
+     * Populated from md5s right after login and grown as files are
+     * uploaded, so duplicate detection stays effective for the entire
+     * app run without needing a restart (see README "Known issues"). */
+    hash_set_t *md5_set;
+    /* Signatures ("title|artist|album|track", normalized) of files
+     * successfully uploaded so far during this session (see
+     * upload_to_ibroadcast()). Used as a secondary duplicate check when
+     * tag data is available, so that if the same track is reached again
+     * via a different path/filename (or a re-encoded copy with a
+     * different MD5) later in the same run, it is still recognised and
+     * skipped instead of being uploaded twice.
+     *
+     * Note: the iBroadcast API used here (email/password + token login)
+     * only exposes the MD5 list of the existing server-side library, not
+     * full track metadata, so this set intentionally does not attempt to
+     * pre-populate signatures for tracks that were uploaded in a
+     * *previous* run - only MD5 matching (profile.md5_set) covers those.
+     */
+    hash_set_t *tag_set;
     unsigned int running_threads;
 } profile_data_t;
 
@@ -64,6 +86,14 @@ typedef struct __memory_chunk_ {
 typedef struct __file_info_ {
     char *name;
     char *md5;
+    /* Optional display name derived from tags ("Artist - Title"), or the
+     * file's basename when no usable tags were found. May be NULL only
+     * if allocation failed. */
+    char *display_name;
+    /* Optional tag-based duplicate-detection signature. NULL when the
+     * file had no usable title/artist tags (falls back to MD5-only
+     * duplicate detection for that file). */
+    char *tag_sig;
 } f_info_t;
 
 typedef struct __file_list_ {
@@ -73,6 +103,10 @@ typedef struct __file_list_ {
     size_t remaining;
     size_t idx;
     size_t errored;
+    /* Files skipped specifically because a tag-based signature match
+     * was found (subset of `skipped`), tracked separately purely for
+     * diagnostics/logging. */
+    size_t tag_dupes;
     f_info_t **list;
 } f_list_t;
 

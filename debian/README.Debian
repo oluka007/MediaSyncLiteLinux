@@ -1,6 +1,9 @@
 mediasynclite for Debian
------------------------
+-------------------------
 
-<possible notes regarding this package - if none, delete this file>
+MediaSync Lite installs a desktop entry (mediasynclite.desktop) and an
+icon set under /usr/share/icons/hicolor, so it appears with its icon in
+the application menu / dock of any freedesktop.org-compliant desktop
+environment (GNOME, KDE, XFCE, etc.) after installation.
 
  -- Ryan Layne <ryan@ibroadcast.com>  Fri, 19 Mar 2021 14:55:00 -0700

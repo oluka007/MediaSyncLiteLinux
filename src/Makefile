@@ -14,7 +14,7 @@ LDFLAGS = `pkg-config --libs gtk+-3.0 libcurl libssl libcrypto` -ljansson -lpthr
 
 SRCDIR = $(PRJDIR)/src
 
-APP_OBJS = tools.o ibmsl.o
+APP_OBJS = tools.o ibmsl.o tags.o hashset.o
 
 all:  directories $(BINDIR)/$(BIN_NAME)
 
