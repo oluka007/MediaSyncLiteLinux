@@ -25,6 +25,33 @@ sudo dnf groupinstall "C Development Tools and Libraries"
 sudo dnf install jansson-devel libcurl-devel gtk3-devel
 ```
 
+## Arch Linux / CachyOS
+
+Build a native pacman package (x86_64):
+
+```bash
+sudo pacman -S --needed base-devel git gtk3 curl openssl jansson
+cd packaging/arch
+makepkg -f
+sudo pacman -U "$(makepkg --packagelist)"
+```
+
+Run `makepkg` as your normal user, not root. The PKGBUILD fetches this
+fork's remote `master` branch, not uncommitted changes in your working tree.
+The `-git` package version is derived from source history. Rebuild and
+install again to update; this package is not published in an Arch repository
+or the AUR, so `pacman -Syu` alone will not update it.
+
+Launch `mediasynclite` or use the application menu. To uninstall:
+
+```bash
+sudo pacman -R mediasynclite-git
+```
+
+If an older manual installation causes file conflicts, use `pacman -Qo`
+on each conflicting path before removing anything. Do not overwrite files
+owned by other packages.
+
 ## Compile
 Just execute:
 ```bash
@@ -128,19 +155,15 @@ GitHub Actions workflow, which:
 8. Uploads the built `.deb` as a downloadable workflow artifact
    (kept for 14 days).
 
-### Publishing a release
-Pushing a version tag matching `v*.*.*` (e.g. `v0.4.3`) additionally
-triggers the `publish-release` job, which downloads the `.deb` produced by
-the build job and publishes it as a **GitHub Release** with the package
-attached as a downloadable asset — this is the persistent, user-facing way
-to distribute the package (unlike the 14-day workflow artifact above).
+The [`Build Arch Package`](.github/workflows/build-arch.yml) workflow runs
+the same checks through the Arch tooling in an official `archlinux:base-devel`
+container: `makepkg` build, package-content validation
+(`packaging/arch/validate-package.sh`), advisory `namcap` lint, a
+`pacman -U` installation test inside the container, and a downloadable
+package artifact (kept for 14 days).
 
-To cut a release:
-```bash
-git tag v0.4.3
-git push origin v0.4.3
-```
-The release will appear at
-`https://github.com/<owner>/<repo>/releases/tag/v0.4.3` once the workflow
-completes, with release notes auto-generated from merged PRs/commits since
-the previous tag.
+### Publishing a release
+The workflows currently upload temporary build artifacts; they do not
+publish GitHub Releases or run on tag-only pushes. To distribute a
+persistent release, create a GitHub Release explicitly and attach verified
+packages. Pushing a version tag alone does not publish a release.

@@ -1,0 +1,72 @@
+name: Build Arch Package
+
+on:
+  push:
+    branches: ['**']
+  pull_request:
+    branches: [master]
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+jobs:
+  build-arch:
+    runs-on: ubuntu-latest
+    container:
+      image: archlinux:base-devel
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Install build dependencies
+        run: |
+          pacman -Syu --noconfirm --needed git base-devel gtk3 curl openssl jansson desktop-file-utils namcap
+
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Prepare exact checkout build
+        run: |
+          # The build user runs git against the root-owned checkout.
+          git config --system --add safe.directory "$GITHUB_WORKSPACE"
+          mkdir -p "$RUNNER_TEMP/arch-package"
+          cp packaging/arch/PKGBUILD "$RUNNER_TEMP/arch-package/PKGBUILD"
+          # Pin the CI copy to this exact commit from the checked-out workspace.
+          sed -i "s|^source=.*|source=(\"mediasynclite::git+file://$GITHUB_WORKSPACE#commit=$(git rev-parse HEAD)\")|" \
+            "$RUNNER_TEMP/arch-package/PKGBUILD"
+          # makepkg refuses to run as root; build as an unprivileged user.
+          useradd -m builder
+          chown -R builder:builder "$GITHUB_WORKSPACE" "$RUNNER_TEMP/arch-package"
+
+      - name: Build as an unprivileged user
+        run: |
+          cd "$RUNNER_TEMP/arch-package"
+          runuser -u builder -- makepkg -f --noconfirm
+
+      - name: Validate package contents
+        run: |
+          bash packaging/arch/validate-package.sh "$RUNNER_TEMP"/arch-package/mediasynclite-git-*.pkg.tar.zst
+
+      - name: Lint package (advisory)
+        run: |
+          namcap packaging/arch/PKGBUILD || true
+          namcap "$RUNNER_TEMP"/arch-package/mediasynclite-git-*.pkg.tar.zst || true
+
+      - name: Test installation in the container
+        run: |
+          pacman -U --noconfirm "$RUNNER_TEMP"/arch-package/mediasynclite-git-*.pkg.tar.zst
+          pacman -Qkk mediasynclite-git
+          test -x /usr/bin/mediasynclite
+          desktop-file-validate /usr/share/applications/mediasynclite.desktop
+
+      - name: Upload package
+        uses: actions/upload-artifact@v4
+        with:
+          name: mediasynclite-pacman
+          path: ${{ runner.temp }}/arch-package/mediasynclite-git-*.pkg.tar.zst
+          if-no-files-found: error
+          retention-days: 14
