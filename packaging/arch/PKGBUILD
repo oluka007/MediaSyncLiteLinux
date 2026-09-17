@@ -1,0 +1,40 @@
+# Maintainer: oluka007 <169479385+oluka007@users.noreply.github.com>
+# Upstream: Andrey Andruschenko (iBroadcast Media Sync Lite)
+
+pkgname=mediasynclite-git
+pkgver=0.4.3.r51.gc246361
+pkgrel=1
+pkgdesc="Linux-native graphical uploader for iBroadcast"
+arch=('x86_64')
+url="https://github.com/oluka007/MediaSyncLiteLinux"
+license=('GPL-3.0-or-later')
+depends=('gtk3' 'curl' 'openssl' 'jansson')
+makedepends=('git' 'gcc' 'make' 'pkgconf')
+provides=("${pkgname%-git}")
+conflicts=("${pkgname%-git}")
+source=("${pkgname%-git}::git+${url}.git#branch=master")
+md5sums=('SKIP')
+
+pkgver() {
+  cd "${pkgname%-git}"
+  # Tagged checkout: v0.4.3-3-ghash -> 0.4.3.r3.ghash
+  local desc
+  desc=$(git describe --long --tags 2>/dev/null | sed 's/^v//;s/-/.r/;s/-/./g')
+  if [ -n "$desc" ]; then
+    printf '%s' "$desc"
+  else
+    printf "0.4.3.r%s.g%s" "$(git rev-list --count HEAD)" "$(git rev-parse --short HEAD)"
+  fi
+}
+
+build() {
+  make -C "${pkgname%-git}"
+}
+
+check() {
+  test -x "${pkgname%-git}/mediasynclite"
+}
+
+package() {
+  make PREFIX=/usr DESTDIR="$pkgdir" -C "${pkgname%-git}" install
+}

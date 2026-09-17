@@ -2,3 +2,8 @@
 *.o
 /mediasynclite
 /dist
+/packaging/arch/src/
+/packaging/arch/pkg/
+/packaging/arch/mediasynclite/
+/packaging/arch/*.pkg.tar.zst
+/packaging/arch/*.sig
